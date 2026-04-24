@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-
-#!/usr/bin/env bash
 #
 # taxform.sh — Download IRS tax forms and instructions
 #
@@ -22,7 +20,7 @@ Description:
 
 Options:
   -y YEAR
-      Tax year (default: current year)
+      Tax year (default: last year)
 
   -f FORM
       Form number (e.g. 1040) [required]
@@ -39,19 +37,13 @@ Options:
   -h
       Show this help message
 
-Defaults:
-  If neither -I nor -i is specified:
-    Download form only
-
 Behavior:
-  Attempts download from:
-    1) irs-prior (historical forms)
-    2) irs-pdf   (current forms fallback)
+  Attempts multiple years if needed:
+    YEAR → YEAR-1 → YEAR-2
 
 Examples:
   $(basename "$0") -f 1040
   $(basename "$0") -f 1040 -I
-  $(basename "$0") -f 1040 -i
   $(basename "$0") -y 2022 -f 1099
 EOF
 }
@@ -61,17 +53,13 @@ download_file() {
     local url_prior="https://www.irs.gov/pub/irs-prior/${filename}"
     local url_current="https://www.irs.gov/pub/irs-pdf/${filename}"
 
-    if [[ "$quiet" == false ]]; then
-        echo "Downloading $filename..."
-    fi
+    [[ "$quiet" == false ]] && echo "Downloading $filename..."
 
-    # Try prior first
     if curl -fsS -O "$url_prior"; then
         [[ "$quiet" == false ]] && echo "✓ $filename (irs-prior)"
         return 0
     fi
 
-    # Fallback to current
     if curl -fsS -O "$url_current"; then
         [[ "$quiet" == false ]] && echo "✓ $filename (irs-pdf fallback)"
         return 0
@@ -81,8 +69,22 @@ download_file() {
     return 1
 }
 
+download_with_year_fallback() {
+    local prefix="$1" # f1040 or i1040
+
+    for y in "${years_to_try[@]}"; do
+        local filename="${prefix}--${y}.pdf"
+        if download_file "$filename"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # --- defaults ---
-year="$(date +%Y)"
+current_year="$(date +%Y)"
+year="$((current_year - 1))" # better default
 form=""
 quiet=false
 mode="form"
@@ -119,8 +121,8 @@ if [[ -z "$form" ]]; then
     exit 1
 fi
 
-form_file="f${form}--${year}.pdf"
-instr_file="i${form}--${year}.pdf"
+# Years to try: requested → previous → one more back
+years_to_try=("$year" "$((year - 1))" "$((year - 2))")
 
 form_ok=false
 instr_ok=false
@@ -128,14 +130,14 @@ instr_ok=false
 # --- execution ---
 case "$mode" in
 form)
-    download_file "$form_file" && form_ok=true
+    download_with_year_fallback "f${form}" && form_ok=true
     ;;
 instructions)
-    download_file "$instr_file" && instr_ok=true
+    download_with_year_fallback "i${form}" && instr_ok=true
     ;;
 both)
-    download_file "$form_file" && form_ok=true
-    download_file "$instr_file" && instr_ok=true
+    download_with_year_fallback "f${form}" && form_ok=true
+    download_with_year_fallback "i${form}" && instr_ok=true
     ;;
 esac
 
