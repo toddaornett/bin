@@ -50,14 +50,14 @@ set -e
 : "${TEST_DOMAINS:=github.com,google.com,apple.com,api.github.com}"
 
 _normalize_list() {
-	# Collapses any run of commas and/or whitespace into a single comma, and
-	# trims a leading/trailing comma. Used for PRIMARY_DNS / TEST_DOMAINS,
-	# whose individual entries never contain whitespace themselves.
-	local norm
-	norm=$(printf '%s' "$1" | tr -s ' \t,' ',')
-	norm="${norm#,}"
-	norm="${norm%,}"
-	printf '%s' "$norm"
+  # Collapses any run of commas and/or whitespace into a single comma, and
+  # trims a leading/trailing comma. Used for PRIMARY_DNS / TEST_DOMAINS,
+  # whose individual entries never contain whitespace themselves.
+  local norm
+  norm=$(printf '%s' "$1" | tr -s ' \t,' ',')
+  norm="${norm#,}"
+  norm="${norm%,}"
+  printf '%s' "$norm"
 }
 IFS=',' read -r -a PRIMARY_DNS <<<"$(_normalize_list "$PRIMARY_DNS")"
 IFS=',' read -r -a TEST_DOMAINS <<<"$(_normalize_list "$TEST_DOMAINS")"
@@ -66,7 +66,7 @@ IFS=',' read -r -a TEST_DOMAINS <<<"$(_normalize_list "$TEST_DOMAINS")"
 # Help / usage
 # ------------------------------------------------------------------------
 usage() {
-	cat <<'EOF'
+  cat <<'EOF'
 repair_network.sh - macOS Network & DNS Socket Repair Tool
 
 Resolves mDNSResponder socket stalls (EINVAL 22), stale interface bindings,
@@ -100,6 +100,19 @@ OPTIONS
             multiple names in one value must be comma-separated, not
             space-separated.
 
+    --force-dns
+            When a service's current DNS servers don't match PRIMARY_DNS,
+            overwrite them without prompting. Without this flag, in an
+            interactive terminal the script asks for confirmation before
+            changing DNS; in a non-interactive context (e.g. cron) it
+            leaves DNS untouched on mismatch unless this flag is given.
+
+    --check-only
+            Only report whether each targeted service's DNS servers match
+            PRIMARY_DNS; do not change DNS, cycle interfaces, or flush
+            caches. Combine with --list-style targeting (--all, --service,
+            or auto-detect) to audit one, several, or all services.
+
 SERVICE
     One or more trailing network service names to repair, equivalent to
     --service.
@@ -110,6 +123,13 @@ DEFAULT BEHAVIOR
         a USB/LAN adapter, etc.) has an active link, that service is used.
       - Otherwise, the "Wi-Fi" service is used.
     Run with --list to see what would be picked, marked in the output.
+
+    DNS is only changed (permanently, via networksetup) when the service's
+    current DNS servers don't already match PRIMARY_DNS. If they match,
+    the script leaves DNS alone and just reports that. If they don't match
+    and the script is running in an interactive terminal, you'll be asked
+    to confirm before it overwrites them; pass --force-dns to skip the
+    prompt (e.g. for unattended/cron use).
 
 ENVIRONMENT VARIABLES
     PRIMARY_DNS    List of DNS server IPs to configure, separated by commas
@@ -125,6 +145,8 @@ EXAMPLES
     repair_network.sh -s Ethernet             # repair only Ethernet
     repair_network.sh --service "Wi-Fi,Ethernet"
     repair_network.sh --all                   # repair every active service
+    repair_network.sh --all --check-only      # audit DNS on every service
+    repair_network.sh -s Wi-Fi --force-dns    # overwrite DNS without asking
     PRIMARY_DNS="9.9.9.9,149.112.112.112" repair_network.sh -s Wi-Fi
 
 EXIT STATUS
@@ -143,137 +165,260 @@ EOF
 #   SVC_PORTS[i]   - hardware port type (e.g. "Wi-Fi", "Ethernet")
 #   SVC_ENABLED[i] - 0 if enabled, 1 if disabled
 _collect_services() {
-	SVC_NAMES=()
-	SVC_DEVICES=()
-	SVC_PORTS=()
-	SVC_ENABLED=()
-	local line name disabled
-	name=""
-	disabled=0
-	while IFS= read -r line; do
-		if [[ "$line" =~ ^\([0-9]+\)\ (.+)$ ]]; then
-			name="${BASH_REMATCH[1]}"
-			if [[ "$name" == \** ]]; then
-				disabled=1
-				name="${name#\*}"
-			else
-				disabled=0
-			fi
-		elif [[ "$line" =~ Hardware\ Port:\ ([^,]+),\ Device:\ ([^,\)]+) ]]; then
-			[[ -n "$name" ]] || continue
-			SVC_NAMES+=("$name")
-			SVC_PORTS+=("${BASH_REMATCH[1]}")
-			SVC_DEVICES+=("${BASH_REMATCH[2]}")
-			SVC_ENABLED+=("$disabled")
-			name=""
-		fi
-	done < <(networksetup -listnetworkserviceorder 2>/dev/null)
+  SVC_NAMES=()
+  SVC_DEVICES=()
+  SVC_PORTS=()
+  SVC_ENABLED=()
+  local line name disabled
+  name=""
+  disabled=0
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^\([0-9]+\)\ (.+)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      if [[ "$name" == \** ]]; then
+        disabled=1
+        name="${name#\*}"
+      else
+        disabled=0
+      fi
+    elif [[ "$line" =~ Hardware\ Port:\ ([^,]+),\ Device:\ ([^,\)]+) ]]; then
+      [[ -n "$name" ]] || continue
+      SVC_NAMES+=("$name")
+      SVC_PORTS+=("${BASH_REMATCH[1]}")
+      SVC_DEVICES+=("${BASH_REMATCH[2]}")
+      SVC_ENABLED+=("$disabled")
+      name=""
+    fi
+  done < <(networksetup -listnetworkserviceorder 2>/dev/null)
 }
 
 _is_wifi_port() {
-	local port=" $1 "
-	shopt -s nocasematch
-	local rc=1
-	if [[ "$port" =~ wi-?fi ]] || [[ "$port" =~ airport ]]; then
-		rc=0
-	fi
-	shopt -u nocasematch
-	return $rc
+  local port=" $1 "
+  shopt -s nocasematch
+  local rc=1
+  if [[ "$port" =~ wi-?fi ]] || [[ "$port" =~ airport ]]; then
+    rc=0
+  fi
+  shopt -u nocasematch
+  return $rc
 }
 
 _is_ethernet_port() {
-	local port=" $1 "
-	shopt -s nocasematch
-	local rc=1
-	if [[ "$port" =~ ethernet ]] || [[ "$port" =~ [[:space:]]lan[[:space:]] ]]; then
-		rc=0
-	fi
-	shopt -u nocasematch
-	return $rc
+  local port=" $1 "
+  shopt -s nocasematch
+  local rc=1
+  if [[ "$port" =~ ethernet ]] || [[ "$port" =~ [[:space:]]lan[[:space:]] ]]; then
+    rc=0
+  fi
+  shopt -u nocasematch
+  return $rc
 }
 
 # Prints the service name that should be used when none was specified.
 # Prefers an active (linked) Ethernet-type service; falls back to Wi-Fi.
 _pick_default_service() {
-	local i
-	for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-		if [[ "${SVC_ENABLED[$i]}" == "0" ]] && _is_ethernet_port "${SVC_PORTS[$i]}"; then
-			if [[ -n "${SVC_DEVICES[$i]}" ]] && ifconfig "${SVC_DEVICES[$i]}" 2>/dev/null | grep -q "status: active"; then
-				printf '%s' "${SVC_NAMES[$i]}"
-				return 0
-			fi
-		fi
-	done
-	for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-		if _is_wifi_port "${SVC_PORTS[$i]}"; then
-			printf '%s' "${SVC_NAMES[$i]}"
-			return 0
-		fi
-	done
-	return 1
+  local i
+  for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+    if [[ "${SVC_ENABLED[$i]}" == "0" ]] && _is_ethernet_port "${SVC_PORTS[$i]}"; then
+      if [[ -n "${SVC_DEVICES[$i]}" ]] && ifconfig "${SVC_DEVICES[$i]}" 2>/dev/null | grep -q "status: active"; then
+        printf '%s' "${SVC_NAMES[$i]}"
+        return 0
+      fi
+    fi
+  done
+  for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+    if _is_wifi_port "${SVC_PORTS[$i]}"; then
+      printf '%s' "${SVC_NAMES[$i]}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 cmd_list() {
-	_collect_services
-	local default_name
-	default_name=$(_pick_default_service || true)
-	printf '%-24s %-8s %-22s %-9s %-6s %s\n' "SERVICE" "DEVICE" "HARDWARE PORT" "STATUS" "LINK" "IPV4"
-	local i
-	for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-		local svc="${SVC_NAMES[$i]}" dev="${SVC_DEVICES[$i]}" port="${SVC_PORTS[$i]}"
-		local status_label="enabled" link="down" ip="-" mark=" "
-		[[ "${SVC_ENABLED[$i]}" == "1" ]] && status_label="disabled"
-		if [[ -n "$dev" ]]; then
-			ifconfig "$dev" 2>/dev/null | grep -q "status: active" && link="up"
-			ip=$(ifconfig "$dev" 2>/dev/null | awk '/inet /{print $2; exit}')
-			[[ -z "$ip" ]] && ip="-"
-		fi
-		[[ "$svc" == "$default_name" ]] && mark="*"
-		printf '%s%-23s %-8s %-22s %-9s %-6s %s\n' "$mark" "$svc" "${dev:--}" "$port" "$status_label" "$link" "$ip"
-	done
-	if [[ -n "$default_name" ]]; then
-		echo
-		echo "* = service that would be repaired by default (no --service/--all given)"
-	fi
+  _collect_services
+  local default_name
+  default_name=$(_pick_default_service || true)
+  printf '%-24s %-8s %-22s %-9s %-6s %s\n' "SERVICE" "DEVICE" "HARDWARE PORT" "STATUS" "LINK" "IPV4"
+  local i
+  for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+    local svc="${SVC_NAMES[$i]}" dev="${SVC_DEVICES[$i]}" port="${SVC_PORTS[$i]}"
+    local status_label="enabled" link="down" ip="-" mark=" "
+    [[ "${SVC_ENABLED[$i]}" == "1" ]] && status_label="disabled"
+    if [[ -n "$dev" ]]; then
+      ifconfig "$dev" 2>/dev/null | grep -q "status: active" && link="up"
+      ip=$(ifconfig "$dev" 2>/dev/null | awk '/inet /{print $2; exit}')
+      [[ -z "$ip" ]] && ip="-"
+    fi
+    [[ "$svc" == "$default_name" ]] && mark="*"
+    printf '%s%-23s %-8s %-22s %-9s %-6s %s\n' "$mark" "$svc" "${dev:--}" "$port" "$status_label" "$link" "$ip"
+  done
+  if [[ -n "$default_name" ]]; then
+    echo
+    echo "* = service that would be repaired by default (no --service/--all given)"
+  fi
+}
+
+# ------------------------------------------------------------------------
+# DNS comparison helpers
+# ------------------------------------------------------------------------
+# Prints the service's currently configured DNS servers, one per line,
+# normalized to empty output if none are set (rather than networksetup's
+# "There aren't any DNS Servers set on ..." sentence).
+_get_current_dns() {
+  local svc="$1"
+  local out
+  out=$(networksetup -getdnsservers "$svc" 2>/dev/null)
+  if [[ "$out" == "There aren't any DNS Servers set on"* ]]; then
+    out=""
+  fi
+  printf '%s' "$out"
+}
+
+# Returns 0 if the service's current DNS servers match PRIMARY_DNS
+# (compared as sorted sets, so order doesn't matter), 1 otherwise.
+_dns_matches() {
+  local svc="$1"
+  local current_sorted expected_sorted
+  current_sorted=$(_get_current_dns "$svc" | tr -s ' \t' '\n' | sed '/^$/d' | sort)
+  expected_sorted=$(printf '%s\n' "${PRIMARY_DNS[@]}" | sort)
+  [[ "$current_sorted" == "$expected_sorted" ]]
+}
+
+# True when the interface has a non-link-local IPv4. After a Wi-Fi power
+# cycle macOS often reports status: active with inet 169.254.x.x (or a
+# stale lease) before DHCP finishes; treating that as "up" makes the first
+# TEST_DOMAINS lookup fail while later ones succeed.
+_has_usable_ipv4() {
+  local device="$1"
+  local ip
+  ip=$(ifconfig "$device" 2>/dev/null | awk '/inet / { print $2; exit }')
+  [[ -n "$ip" && "$ip" != 169.254.* && "$ip" != 127.* ]]
+}
+
+_has_default_route() {
+  route -n get default 2>/dev/null | grep -q "gateway:"
+}
+
+# Resolve over IPv4 only. AF_UNSPEC can raise EAI_AGAIN on a half-up
+# stack when the name has AAAA but IPv6 is not ready (common after VPN).
+_resolve_ok() {
+  local domain="$1"
+  python3 -c '
+import socket, sys
+try:
+    infos = socket.getaddrinfo(sys.argv[1], 443, socket.AF_INET, socket.SOCK_STREAM)
+    sys.exit(0 if infos else 1)
+except OSError:
+    sys.exit(1)
+' "$domain"
+}
+
+_wait_for_link() {
+  local svc="$1" device="$2"
+  local i
+  echo "▶ Waiting for '${svc}' link to re-establish..."
+  for i in {1..30}; do
+    if _has_usable_ipv4 "$device" && _has_default_route; then
+      sleep 1
+      return 0
+    fi
+    sleep 1
+  done
+  echo "  ⚠ '${svc}' did not obtain a usable IPv4/default route within 30s; continuing anyway."
+  return 0
+}
+
+_wait_for_resolver() {
+  local i domain
+  echo "▶ Waiting for DNS resolver to answer..."
+  for i in {1..15}; do
+    for domain in "${TEST_DOMAINS[@]}"; do
+      if _resolve_ok "$domain"; then
+        return 0
+      fi
+    done
+    sleep 1
+  done
+  echo "  ⚠ Resolver did not answer within 15s; continuing with per-domain checks."
+  return 0
 }
 
 # ------------------------------------------------------------------------
 # Repair actions
 # ------------------------------------------------------------------------
 _repair_service() {
-	local svc="$1" device="$2" port="$3"
+  local svc="$1" device="$2" port="$3"
 
-	echo "▶ Configuring DNS servers on '${svc}'${device:+ (${device})}..."
-	networksetup -setsearchdomains "$svc" "Empty" 2>/dev/null || true
-	networksetup -setdnsservers "$svc" "${PRIMARY_DNS[@]}" 2>/dev/null || true
-	echo "  ✔ Configured DNS: ${PRIMARY_DNS[*]}"
+  if _dns_matches "$svc"; then
+    echo "▶ DNS on '${svc}' already matches PRIMARY_DNS (${PRIMARY_DNS[*]}); leaving as-is."
+  else
+    local current
+    current=$(_get_current_dns "$svc" | tr '\n' ' ' | xargs)
+    if [[ -z "$current" ]]; then
+      echo "▶ DNS on '${svc}' is currently unset (using DHCP-provided DNS)."
+    else
+      echo "▶ DNS on '${svc}' is currently: ${current}"
+    fi
+    echo "  Does not match PRIMARY_DNS: ${PRIMARY_DNS[*]}"
 
-	if [[ -z "$device" ]]; then
-		echo "  ℹ No hardware device associated with '${svc}'; skipping interface cycle."
-		return 0
-	fi
+    local do_set=true
+    if [[ "$FORCE_DNS" != "true" && -t 0 && -t 1 ]]; then
+      read -r -p "  Overwrite DNS on '${svc}' with ${PRIMARY_DNS[*]}? [y/N] " ans
+      [[ "$ans" =~ ^[Yy]$ ]] || do_set=false
+    elif [[ "$FORCE_DNS" != "true" ]]; then
+      # Non-interactive and not forced: don't silently change DNS.
+      do_set=false
+      echo "  ↷ Non-interactive session and --force-dns not given; skipping DNS change on '${svc}'."
+    fi
 
-	if _is_wifi_port "$port"; then
-		echo "▶ Cycling Wi-Fi interface '${device}' to clear stale kernel socket bindings..."
-		networksetup -setairportpower "$device" off
-		sleep 2
-		networksetup -setairportpower "$device" on
-	else
-		echo "▶ Cycling network service '${svc}' (${device}) to clear stale kernel socket bindings..."
-		networksetup -setnetworkserviceenabled "$svc" off
-		sleep 2
-		networksetup -setnetworkserviceenabled "$svc" on
-	fi
+    if [[ "$do_set" == "true" ]]; then
+      networksetup -setsearchdomains "$svc" "Empty" 2>/dev/null || true
+      networksetup -setdnsservers "$svc" "${PRIMARY_DNS[@]}" 2>/dev/null || true
+      if _dns_matches "$svc"; then
+        echo "  ✔ Configured and verified DNS: ${PRIMARY_DNS[*]}"
+      else
+        echo "  ⚠ Set DNS but verification did not match expected servers; check manually with:"
+        echo "      networksetup -getdnsservers \"${svc}\""
+      fi
+    else
+      echo "  ↷ Skipped DNS change on '${svc}' per user choice."
+    fi
+  fi
 
-	echo "▶ Waiting for '${svc}' link to re-establish..."
-	local i
-	for i in {1..20}; do
-		if ifconfig "$device" 2>/dev/null | grep -q "status: active" && ifconfig "$device" 2>/dev/null | grep -q "inet "; then
-			sleep 2
-			break
-		fi
-		sleep 1
-	done
+  if [[ -z "$device" ]]; then
+    echo "  ℹ No hardware device associated with '${svc}'; skipping interface cycle."
+    return 0
+  fi
+
+  if _is_wifi_port "$port"; then
+    echo "▶ Cycling Wi-Fi interface '${device}' to clear stale kernel socket bindings..."
+    networksetup -setairportpower "$device" off
+    sleep 2
+    networksetup -setairportpower "$device" on
+  else
+    echo "▶ Cycling network service '${svc}' (${device}) to clear stale kernel socket bindings..."
+    networksetup -setnetworkserviceenabled "$svc" off
+    sleep 2
+    networksetup -setnetworkserviceenabled "$svc" on
+  fi
+
+  _wait_for_link "$svc" "$device"
+}
+
+_check_service_dns() {
+  local svc="$1"
+  local current
+  current=$(_get_current_dns "$svc" | tr '\n' ' ' | xargs)
+  if _dns_matches "$svc"; then
+    echo "✔ ${svc}: matches PRIMARY_DNS (${PRIMARY_DNS[*]})"
+  else
+    if [[ -z "$current" ]]; then
+      echo "✘ ${svc}: unset (DHCP-provided DNS) — does not match PRIMARY_DNS (${PRIMARY_DNS[*]})"
+    else
+      echo "✘ ${svc}: ${current} — does not match PRIMARY_DNS (${PRIMARY_DNS[*]})"
+    fi
+  fi
 }
 
 # ------------------------------------------------------------------------
@@ -282,187 +427,226 @@ _repair_service() {
 ACTION="repair"
 MODE="auto" # auto | all | explicit
 RAW_SERVICE_ARGS=()
+FORCE_DNS=false
+CHECK_ONLY=false
 
 while [[ $# -gt 0 ]]; do
-	case "$1" in
-	-h | --help)
-		usage
-		exit 0
-		;;
-	-l | --list)
-		ACTION="list"
-		shift
-		;;
-	-a | --all)
-		MODE="all"
-		shift
-		;;
-	-s | --service)
-		[[ -n "${2:-}" ]] || {
-			echo "Error: $1 requires an argument" >&2
-			exit 1
-		}
-		RAW_SERVICE_ARGS+=("$2")
-		shift 2
-		;;
-	--service=*)
-		RAW_SERVICE_ARGS+=("${1#*=}")
-		shift
-		;;
-	--)
-		shift
-		while [[ $# -gt 0 ]]; do
-			RAW_SERVICE_ARGS+=("$1")
-			shift
-		done
-		;;
-	-*)
-		echo "Unknown option: $1" >&2
-		echo >&2
-		usage >&2
-		exit 1
-		;;
-	*)
-		RAW_SERVICE_ARGS+=("$1")
-		shift
-		;;
-	esac
+  case "$1" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -l | --list)
+    ACTION="list"
+    shift
+    ;;
+  -a | --all)
+    MODE="all"
+    shift
+    ;;
+  -s | --service)
+    [[ -n "${2:-}" ]] || {
+      echo "Error: $1 requires an argument" >&2
+      exit 1
+    }
+    RAW_SERVICE_ARGS+=("$2")
+    shift 2
+    ;;
+  --service=*)
+    RAW_SERVICE_ARGS+=("${1#*=}")
+    shift
+    ;;
+  --force-dns)
+    FORCE_DNS=true
+    shift
+    ;;
+  --check-only)
+    CHECK_ONLY=true
+    shift
+    ;;
+  --)
+    shift
+    while [[ $# -gt 0 ]]; do
+      RAW_SERVICE_ARGS+=("$1")
+      shift
+    done
+    ;;
+  -*)
+    echo "Unknown option: $1" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+  *)
+    RAW_SERVICE_ARGS+=("$1")
+    shift
+    ;;
+  esac
 done
 
 if [[ "$ACTION" == "list" ]]; then
-	cmd_list
-	exit 0
+  cmd_list
+  exit 0
 fi
 
 # Split each raw argument on commas only (service names may contain spaces),
 # trimming surrounding whitespace from each resulting token.
 FINAL_SERVICES=()
 for entry in "${RAW_SERVICE_ARGS[@]}"; do
-	IFS=',' read -r -a _tokens <<<"$entry"
-	for tok in "${_tokens[@]}"; do
-		tok="${tok#"${tok%%[![:space:]]*}"}"
-		tok="${tok%"${tok##*[![:space:]]}"}"
-		[[ -n "$tok" ]] && FINAL_SERVICES+=("$tok")
-	done
+  IFS=',' read -r -a _tokens <<<"$entry"
+  for tok in "${_tokens[@]}"; do
+    tok="${tok#"${tok%%[![:space:]]*}"}"
+    tok="${tok%"${tok##*[![:space:]]}"}"
+    [[ -n "$tok" ]] && FINAL_SERVICES+=("$tok")
+  done
 done
 
 if [[ "$MODE" == "all" && ${#FINAL_SERVICES[@]} -gt 0 ]]; then
-	echo "Error: cannot combine --all with --service or SERVICE arguments." >&2
-	exit 1
+  echo "Error: cannot combine --all with --service or SERVICE arguments." >&2
+  exit 1
 fi
 
 _collect_services
 
 TARGET_INDEXES=()
 if [[ "$MODE" == "all" ]]; then
-	for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-		if [[ "${SVC_ENABLED[$i]}" == "0" ]] && { _is_wifi_port "${SVC_PORTS[$i]}" || _is_ethernet_port "${SVC_PORTS[$i]}"; }; then
-			TARGET_INDEXES+=("$i")
-		fi
-	done
-	if [[ ${#TARGET_INDEXES[@]} -eq 0 ]]; then
-		echo "Error: no enabled Wi-Fi or Ethernet services found to repair." >&2
-		exit 1
-	fi
+  for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+    if [[ "${SVC_ENABLED[$i]}" == "0" ]] && { _is_wifi_port "${SVC_PORTS[$i]}" || _is_ethernet_port "${SVC_PORTS[$i]}"; }; then
+      TARGET_INDEXES+=("$i")
+    fi
+  done
+  if [[ ${#TARGET_INDEXES[@]} -eq 0 ]]; then
+    echo "Error: no enabled Wi-Fi or Ethernet services found to repair." >&2
+    exit 1
+  fi
 elif [[ ${#FINAL_SERVICES[@]} -gt 0 ]]; then
-	for want in "${FINAL_SERVICES[@]}"; do
-		found=-1
-		for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-			if [[ "${SVC_NAMES[$i]}" == "$want" ]]; then
-				found=$i
-				break
-			fi
-		done
-		if [[ $found -eq -1 ]]; then
-			shopt -s nocasematch
-			for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-				if [[ "${SVC_NAMES[$i]}" == "$want" ]]; then
-					found=$i
-					break
-				fi
-			done
-			shopt -u nocasematch
-		fi
-		if [[ $found -eq -1 ]]; then
-			echo "Error: no network service named '${want}' found. Run with --list to see available services." >&2
-			exit 1
-		fi
-		TARGET_INDEXES+=("$found")
-	done
+  for want in "${FINAL_SERVICES[@]}"; do
+    found=-1
+    for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+      if [[ "${SVC_NAMES[$i]}" == "$want" ]]; then
+        found=$i
+        break
+      fi
+    done
+    if [[ $found -eq -1 ]]; then
+      shopt -s nocasematch
+      for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+        if [[ "${SVC_NAMES[$i]}" == "$want" ]]; then
+          found=$i
+          break
+        fi
+      done
+      shopt -u nocasematch
+    fi
+    if [[ $found -eq -1 ]]; then
+      echo "Error: no network service named '${want}' found. Run with --list to see available services." >&2
+      exit 1
+    fi
+    TARGET_INDEXES+=("$found")
+  done
 else
-	default_name=$(_pick_default_service) || {
-		echo "Error: could not auto-detect a Wi-Fi or Ethernet service. Run with --list to see available services, or specify one with --service." >&2
-		exit 1
-	}
-	for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
-		if [[ "${SVC_NAMES[$i]}" == "$default_name" ]]; then
-			TARGET_INDEXES+=("$i")
-			break
-		fi
-	done
+  default_name=$(_pick_default_service) || {
+    echo "Error: could not auto-detect a Wi-Fi or Ethernet service. Run with --list to see available services, or specify one with --service." >&2
+    exit 1
+  }
+  for ((i = 0; i < ${#SVC_NAMES[@]}; i++)); do
+    if [[ "${SVC_NAMES[$i]}" == "$default_name" ]]; then
+      TARGET_INDEXES+=("$i")
+      break
+    fi
+  done
+fi
+
+if [[ "$CHECK_ONLY" == "true" ]]; then
+  echo "🔎 Checking DNS configuration (no changes will be made)..."
+  for i in "${TARGET_INDEXES[@]}"; do
+    _check_service_dns "${SVC_NAMES[$i]}"
+  done
+  exit 0
 fi
 
 echo "🔧 Starting macOS network and DNS repair..."
 target_list=""
 for i in "${TARGET_INDEXES[@]}"; do
-	target_list="${target_list}${SVC_NAMES[$i]}, "
+  target_list="${target_list}${SVC_NAMES[$i]}, "
 done
 echo "▶ Target service(s): ${target_list%, }"
 
 # 1. Check/request sudo privileges if available (interactive terminal or cached credentials)
 HAS_SUDO=false
 if [[ $EUID -eq 0 ]]; then
-	HAS_SUDO=true
+  HAS_SUDO=true
 elif sudo -n true 2>/dev/null; then
-	HAS_SUDO=true
+  HAS_SUDO=true
 elif [[ -t 0 && -t 1 ]]; then
-	echo "🔐 Elevating with sudo to restart mDNSResponder daemon..."
-	if sudo -v 2>/dev/null; then
-		HAS_SUDO=true
-	fi
+  echo "🔐 Elevating with sudo to restart mDNSResponder daemon..."
+  if sudo -v 2>/dev/null; then
+    HAS_SUDO=true
+  fi
 fi
 
 # 2. Flush DNS caches and restart mDNSResponder
 echo "▶ Flushing local DNS cache and restarting resolver..."
 if [[ "$HAS_SUDO" == "true" ]]; then
-	sudo dscacheutil -flushcache 2>/dev/null || dscacheutil -flushcache 2>/dev/null || true
-	sudo killall -HUP mDNSResponder 2>/dev/null || true
-	echo "  ✔ Flushed cache and sent SIGHUP to mDNSResponder via sudo"
+  sudo dscacheutil -flushcache 2>/dev/null || dscacheutil -flushcache 2>/dev/null || true
+  sudo killall -HUP mDNSResponder 2>/dev/null || true
+  echo "  ✔ Flushed cache and sent SIGHUP to mDNSResponder via sudo"
 else
-	dscacheutil -flushcache 2>/dev/null || true
-	killall -HUP mDNSResponder 2>/dev/null || true
-	echo "  ✔ Flushed user-level cache (run with sudo to restart daemon directly)"
+  dscacheutil -flushcache 2>/dev/null || true
+  killall -HUP mDNSResponder 2>/dev/null || true
+  echo "  ✔ Flushed user-level cache (run with sudo to restart daemon directly)"
 fi
 
-# 3 & 4. Reconfigure DNS and cycle each targeted service
+# 3 & 4. Reconfigure DNS (only if mismatched) and cycle each targeted service
 for i in "${TARGET_INDEXES[@]}"; do
-	_repair_service "${SVC_NAMES[$i]}" "${SVC_DEVICES[$i]}" "${SVC_PORTS[$i]}"
+  _repair_service "${SVC_NAMES[$i]}" "${SVC_DEVICES[$i]}" "${SVC_PORTS[$i]}"
 done
 
-# 5. Verify resolution with retry for link warmup
+# 5. Verify resolution only after the resolver is answering; retry
+#    failures once more so a single first-lookup race cannot fail the run.
 echo "▶ Verifying DNS resolution and connectivity..."
+_wait_for_resolver
 ALL_OK=true
+FAILED_DOMAINS=()
 for domain in "${TEST_DOMAINS[@]}"; do
-	RESOLVED=false
-	for attempt in {1..3}; do
-		if python3 -c "import socket, sys; sys.exit(0 if socket.getaddrinfo('$domain', 443) else 1)" 2>/dev/null; then
-			RESOLVED=true
-			break
-		fi
-		sleep 1
-	done
-	if [[ "$RESOLVED" == "true" ]]; then
-		echo "  ✔ $domain resolved successfully"
-	else
-		echo "  ✘ $domain failed to resolve"
-		ALL_OK=false
-	fi
+  RESOLVED=false
+  for attempt in 1 2 3 4 5; do
+    if _resolve_ok "$domain"; then
+      RESOLVED=true
+      break
+    fi
+    sleep "$attempt"
+  done
+  if [[ "$RESOLVED" == "true" ]]; then
+    echo "  ✔ $domain resolved successfully"
+  else
+    echo "  ✘ $domain failed to resolve"
+    FAILED_DOMAINS+=("$domain")
+    ALL_OK=false
+  fi
 done
+
+if [[ "$ALL_OK" != "true" && ${#FAILED_DOMAINS[@]} -gt 0 ]]; then
+  echo "▶ Retrying failed domains once more..."
+  ALL_OK=true
+  for domain in "${FAILED_DOMAINS[@]}"; do
+    if _resolve_ok "$domain"; then
+      echo "  ✔ $domain resolved successfully (on retry)"
+    else
+      echo "  ✘ $domain failed to resolve"
+      ALL_OK=false
+    fi
+  done
+fi
 
 if [[ "$ALL_OK" == "true" ]]; then
-	echo "✨ Network repair complete: all endpoints reachable."
-	exit 0
+  echo "✨ Network repair complete: all endpoints reachable."
+  exit 0
 else
-	echo "⚠️ Some endpoints failed. Try running with sudo if mDNSResponder remains locked: sudo killall -9 mDNSResponder"
-	exit 1
+  if [[ "$HAS_SUDO" == "true" ]]; then
+    echo "⚠️ Some endpoints still failed after cache flush. Check connectivity, DNS, and whether a VPN is intercepting those names."
+  else
+    echo "⚠️ Some endpoints failed. Try running with sudo if mDNSResponder remains locked: sudo killall -HUP mDNSResponder"
+  fi
+  exit 1
 fi
