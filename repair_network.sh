@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # repair_network.sh - macOS Network & DNS Socket Repair Tool
+# by Todd Ornett <toddgh@acquirus.com>
+# Created: September 1, 2026
+# Modified: September 4, 2026
+# Version: 0.0.1
+# Homepage: https://github.com/toddaornett/bin
 # ==============================================================================
 # Resolves mDNSResponder socket stalls (EINVAL 22), stale interface bindings,
 # corrupt DNS search domains, and connectivity drops (e.g. after VPN/FortiClient
@@ -13,8 +18,7 @@
 # ------------
 # OS:        macOS only since macOS-specific tools (networksetup,
 #            dscacheutil, mDNSResponder) are required.
-# Shell:     Bash 3.2 or later (the version macOS ships by default). No
-#            Bash 4+ features (e.g. associative arrays, mapfile) are used.
+# Shell:     Bash 3.2 or later (the version macOS ships by default).
 # Commands (expected to already be present on a stock macOS install):
 #   - networksetup   : list/query services, configure DNS, search domains,
 #                       toggle Wi-Fi power, enable/disable network services
