@@ -15,9 +15,11 @@
 
 set -euo pipefail
 
+SOUND_FILE="/System/Library/Sounds/Glass.aiff"
+
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [-w MINUTES | -d MINUTES | -i SECONDS | -c COUNT]...
+Usage: $(basename "$0") [-q] [-w MINUTES | -d MINUTES | -i SECONDS | -c COUNT]...
 
 Post a synthetic activity event on a schedule so Microsoft Teams keeps your
 presence Available (green) while you are away from the keyboard.
@@ -25,6 +27,9 @@ presence Available (green) while you are away from the keyboard.
 Arguments are processed as a list, left to right. Each one is a step, and any
 of them may be given multiple times:
 
+  -q, --quiet            Do not play the completion sound or show the completion
+                         dialog when the script finishes.
+                         Also accepted as --no-dialog.
   -w, --wait MINUTES     Wait this many minutes without refreshing presence.
   -i, --interval SECONDS Set the seconds between refreshes for every later
                          -d/-c step. Must stay below Teams' roughly 5 minute
@@ -39,7 +44,9 @@ of them may be given multiple times:
   -h, --help             Show this help
 
 If no -d or -c step is given, the script refreshes until interrupted after
-processing the other steps. The script exits after the last step.
+processing the other steps. The script exits after the last step, playing a sound
+and showing a dialog on the desktop to tell you that presence is no longer being
+kept alive (unless -q is given).
 
 Example:
   $(basename "$0") -w 10 -i 120 -d 30 -i 295 -d 240 -w 60 -d 60
@@ -68,6 +75,7 @@ step_types=()
 step_values=()
 has_run_step=0
 unbounded_seen=0
+show_dialog=1
 
 warn_interval() {
   local seconds="$1"
@@ -106,11 +114,40 @@ add_step() {
   step_values+=("$value")
 }
 
+# Play a system sound without blocking. Never fatal: a missing sound file or
+# muted output must not break a clean run under `set -e`. Backgrounded and
+# disowned so the dialog appears immediately and the sound isn't tied to it.
+
+play_sound() {
+  [[ -f "$SOUND_FILE" ]] || return 0
+  afplay "$SOUND_FILE" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
+# Pop a dialog on the desktop once every step has finished. Never fatal: a
+# failure to show it (e.g. no GUI session) must not turn a clean run into an
+# error under `set -e`. The message goes in as an argument rather than being
+# spliced into the AppleScript, so no quoting can break it.
+notify_done() {
+  osascript - "$1" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  tell application "System Events"
+    activate
+    display dialog (item 1 of argv) with title "Teams presence keeper" buttons {"OK"} default button "OK" with icon note
+  end tell
+end run
+APPLESCRIPT
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
   -h | --help)
     usage
     exit 0
+    ;;
+  -q | --quiet | --no-dialog)
+    show_dialog=0
+    shift
     ;;
   -w | --wait)
     [[ $# -ge 2 ]] || die "$1 requires a value."
@@ -410,3 +447,9 @@ for ((step = 0; step < ${#step_types[@]}; step++)); do
     ;;
   esac
 done
+
+echo "All steps completed."
+if [[ "$show_dialog" -eq 1 ]]; then
+  play_sound
+  notify_done "All steps are complete. Teams presence is no longer being refreshed, so you may show as Away soon."
+fi
